@@ -21,6 +21,11 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
+      - name: Regenerate Android project
+        run: |
+          rm -rf android
+          flutter create --platforms=android --org com.telugureader .
+
       - name: Get dependencies
         run: flutter pub get
 
