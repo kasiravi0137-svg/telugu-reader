@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Telugu Reader</string>
+    <string name="accessibility_service_description">స్క్రీన్ మీద కనిపించే text ని చదవడానికి, floating bubble చూపించడానికి ఈ permission వాడుతుంది.</string>
+</resources>
