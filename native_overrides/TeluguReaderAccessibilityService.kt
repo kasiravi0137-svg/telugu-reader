@@ -1,6 +1,7 @@
 package com.telugureader.telugu_reader
 
 import android.accessibilityservice.AccessibilityService
+import android.graphics.Color
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.Handler
@@ -9,11 +10,11 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.view.Gravity
 import android.view.MotionEvent
-import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.ImageView
+import android.widget.TextView
 import java.util.Locale
 import java.util.UUID
 
@@ -22,13 +23,21 @@ class TeluguReaderAccessibilityService : AccessibilityService(), TextToSpeech.On
     private lateinit var windowManager: WindowManager
     private lateinit var bubble: ImageView
     private lateinit var bubbleParams: WindowManager.LayoutParams
+    private var captionView: TextView? = null
+    private var captionParams: WindowManager.LayoutParams? = null
     private var tts: TextToSpeech? = null
-    private var ttsReady = false
 
     private val handler = Handler(Looper.getMainLooper())
     private var isReading = false
     private var lastReadText: String = ""
     private var consecutiveNoNewContent = 0
+    private var sessionId = 0
+    private var scrollStepsThisSession = 0
+    private val maxScrollSteps = 400
+
+    private val adKeywords = listOf(
+        "advertisement", "sponsored", "ad ·", "ప్రకటన"
+    )
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -38,13 +47,12 @@ class TeluguReaderAccessibilityService : AccessibilityService(), TextToSpeech.On
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            val teluguLocale = Locale("te", "IN")
-            val result = tts?.setLanguage(teluguLocale)
-            ttsReady = result != TextToSpeech.LANG_MISSING_DATA &&
-                result != TextToSpeech.LANG_NOT_SUPPORTED
-            tts?.setSpeechRate(1.0f)
+            tts?.setLanguage(Locale("te", "IN"))
+            tts?.setSpeechRate(0.8f)
         }
     }
+
+    // ---------- Floating bubble + caption ----------
 
     private fun setupBubble() {
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
@@ -59,8 +67,7 @@ class TeluguReaderAccessibilityService : AccessibilityService(), TextToSpeech.On
             WindowManager.LayoutParams.TYPE_PHONE
 
         bubbleParams = WindowManager.LayoutParams(
-            140, 140,
-            overlayType,
+            140, 140, overlayType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
@@ -69,19 +76,15 @@ class TeluguReaderAccessibilityService : AccessibilityService(), TextToSpeech.On
             y = 600
         }
 
-        var downX = 0f
-        var downY = 0f
-        var startX = 0
-        var startY = 0
+        var downX = 0f; var downY = 0f
+        var startX = 0; var startY = 0
         var isClick = true
 
         bubble.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
-                    downX = event.rawX
-                    downY = event.rawY
-                    startX = bubbleParams.x
-                    startY = bubbleParams.y
+                    downX = event.rawX; downY = event.rawY
+                    startX = bubbleParams.x; startY = bubbleParams.y
                     isClick = true
                     true
                 }
@@ -103,25 +106,68 @@ class TeluguReaderAccessibilityService : AccessibilityService(), TextToSpeech.On
         }
 
         windowManager.addView(bubble, bubbleParams)
+        setupCaption(overlayType)
+    }
+
+    private fun setupCaption(overlayType: Int) {
+        val caption = TextView(this).apply {
+            setBackgroundColor(0xCC000000.toInt())
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            setPadding(24, 16, 24, 16)
+            maxLines = 3
+            visibility = android.view.View.GONE
+        }
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.BOTTOM
+            y = 60
+        }
+        windowManager.addView(caption, params)
+        captionView = caption
+        captionParams = params
+    }
+
+    private fun showCaption(text: String) {
+        handler.post {
+            captionView?.text = text
+            captionView?.visibility = android.view.View.VISIBLE
+        }
+    }
+
+    private fun hideCaption() {
+        handler.post { captionView?.visibility = android.view.View.GONE }
     }
 
     private fun onBubbleTapped() {
         if (isReading) {
             stopReading()
         } else {
+            sessionId++
+            scrollStepsThisSession = 0
             consecutiveNoNewContent = 0
             lastReadText = ""
-            readCurrentScreen()
+            readCurrentScreen(sessionId)
         }
     }
 
     private fun stopReading() {
         isReading = false
+        sessionId++ // invalidates any pending callbacks from the old session
         tts?.stop()
         bubble.setBackgroundColor(0x33000000)
+        hideCaption()
     }
 
-    private fun readCurrentScreen() {
+    // ---------- Reading + auto-scroll ----------
+
+    private fun readCurrentScreen(mySession: Int) {
+        if (mySession != sessionId) return
         val root = rootInActiveWindow ?: return
         val text = extractVisibleText(root)
         if (text.isBlank()) return
@@ -132,7 +178,7 @@ class TeluguReaderAccessibilityService : AccessibilityService(), TextToSpeech.On
             consecutiveNoNewContent = 0
         }
 
-        if (consecutiveNoNewContent >= 2) {
+        if (consecutiveNoNewContent >= 2 || scrollStepsThisSession > maxScrollSteps) {
             stopReading()
             return
         }
@@ -140,34 +186,54 @@ class TeluguReaderAccessibilityService : AccessibilityService(), TextToSpeech.On
         isReading = true
         bubble.setBackgroundColor(0x66FF6B35)
         lastReadText = text
-        speak(text)
+        speakSentences(text, mySession)
     }
 
-    private fun speak(text: String) {
-        val id = UUID.randomUUID().toString()
+    private fun splitSentences(text: String): List<String> {
+        return text.split(Regex("(?<=[.?!।॥\n])\\s+"))
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+    }
+
+    private fun speakSentences(text: String, mySession: Int) {
+        val sentences = splitSentences(text)
+        if (sentences.isEmpty()) {
+            attemptAutoScrollThenContinue(mySession)
+            return
+        }
+
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) {}
+            override fun onStart(utteranceId: String?) {
+                val idx = utteranceId?.substringAfterLast("-")?.toIntOrNull() ?: return
+                if (mySession == sessionId && idx < sentences.size) {
+                    showCaption(sentences[idx])
+                }
+            }
             override fun onDone(utteranceId: String?) {
-                handler.post {
-                    if (isReading) attemptAutoScrollThenContinue()
+                val idx = utteranceId?.substringAfterLast("-")?.toIntOrNull() ?: return
+                if (mySession == sessionId && idx == sentences.size - 1) {
+                    handler.post { if (isReading && mySession == sessionId) attemptAutoScrollThenContinue(mySession) }
                 }
             }
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
-                handler.post { if (isReading) attemptAutoScrollThenContinue() }
+                handler.post { if (isReading && mySession == sessionId) attemptAutoScrollThenContinue(mySession) }
             }
         })
-        val chunks = text.chunked(3800)
-        for ((index, chunk) in chunks.withIndex()) {
+
+        val id = UUID.randomUUID().toString()
+        sentences.forEachIndexed { index, sentence ->
             val queueMode = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
-            tts?.speak(chunk, queueMode, null, "$id-$index")
+            tts?.speak(sentence, queueMode, null, "$id-$index")
         }
     }
 
-    private fun attemptAutoScrollThenContinue() {
+    private fun attemptAutoScrollThenContinue(mySession: Int) {
+        if (mySession != sessionId) return
         val root = rootInActiveWindow
         val scrollable = root?.let { findScrollableNode(it) }
         val scrolled = scrollable?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) ?: false
+        scrollStepsThisSession++
 
         if (!scrolled) {
             stopReading()
@@ -175,7 +241,7 @@ class TeluguReaderAccessibilityService : AccessibilityService(), TextToSpeech.On
         }
 
         handler.postDelayed({
-            if (isReading) readCurrentScreen()
+            if (isReading && mySession == sessionId) readCurrentScreen(mySession)
         }, 700)
     }
 
@@ -189,11 +255,16 @@ class TeluguReaderAccessibilityService : AccessibilityService(), TextToSpeech.On
         return null
     }
 
+    private fun isAdText(text: String): Boolean {
+        val lower = text.lowercase()
+        return adKeywords.any { lower.contains(it) } && text.length < 40
+    }
+
     private fun extractVisibleText(node: AccessibilityNodeInfo, builder: StringBuilder = StringBuilder()): String {
         if (!node.isVisibleToUser) return builder.toString()
 
         val nodeText = node.text?.toString()?.trim()
-        if (!nodeText.isNullOrEmpty()) {
+        if (!nodeText.isNullOrEmpty() && !isAdText(nodeText)) {
             if (builder.isNotEmpty()) builder.append("\n")
             builder.append(nodeText)
         }
@@ -205,8 +276,7 @@ class TeluguReaderAccessibilityService : AccessibilityService(), TextToSpeech.On
         return builder.toString()
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-    }
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
 
     override fun onInterrupt() {
         stopReading()
@@ -217,6 +287,7 @@ class TeluguReaderAccessibilityService : AccessibilityService(), TextToSpeech.On
         if (::bubble.isInitialized) {
             try { windowManager.removeView(bubble) } catch (_: Exception) {}
         }
+        captionView?.let { try { windowManager.removeView(it) } catch (_: Exception) {} }
         tts?.shutdown()
     }
 }
