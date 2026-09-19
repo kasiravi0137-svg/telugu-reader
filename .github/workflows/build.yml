@@ -21,10 +21,19 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Regenerate Android project
+      - name: Generate Android project scaffold
         run: |
           rm -rf android
           flutter create --platforms=android --org com.telugureader --project-name telugu_reader .
+
+      - name: Apply custom native files
+        run: |
+          mkdir -p android/app/src/main/kotlin/com/telugureader/telugu_reader
+          cp native_overrides/MainActivity.kt android/app/src/main/kotlin/com/telugureader/telugu_reader/MainActivity.kt
+          cp native_overrides/TeluguReaderAccessibilityService.kt android/app/src/main/kotlin/com/telugureader/telugu_reader/TeluguReaderAccessibilityService.kt
+          mkdir -p android/app/src/main/res/xml
+          cp native_overrides/accessibility_service_config.xml android/app/src/main/res/xml/accessibility_service_config.xml
+          python3 native_overrides/patch_manifest.py
 
       - name: Get dependencies
         run: flutter pub get
